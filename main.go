@@ -1,114 +1,144 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
+	"encoding/csv"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
-
-	"github.com/gorilla/mux"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"strings"
 )
 
-// Define the Movie struct
 type Movie struct {
-	ID    string `bson:"_id,omitempty"`
-	Title string `bson:"title,omitempty"`
-	Year  int    `bson:"year,omitempty"`
-	Genre string `bson:"genre,omitempty"`
+	ID     string
+	Title  string
+	Year   int
+	Genres []string
 }
 
-// Define a function to get the MongoDB collection
-func getCollection() (*mongo.Collection, error) {
-	// Set up MongoDB client options
-	clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
+var movies []Movie
 
-	// Connect to MongoDB
-	client, err := mongo.Connect(context.Background(), clientOptions)
+func main() {
+	// read data from the CSV file
+	file, err := os.Open("/home/kenny/Full stack/2/dataset.csv")
 	if err != nil {
-		return nil, err
+		log.Fatal(err)
 	}
+	defer file.Close()
 
-	// Get the MongoDB collection
-	collection := client.Database("joel").Collection("fullstack")
-
-	return collection, nil
-}
-
-// Define a handler function for the GET method with filters
-func getMoviesHandler(w http.ResponseWriter, r *http.Request) {
-	// Parse the query parameters
-	queryParams := r.URL.Query()
-
-	// Get the filter values from the query parameters
-	title := queryParams.Get("title")
-	genre := queryParams.Get("genre")
-	yearStr := queryParams.Get("year")
-	var year int
-	var err error
-	if yearStr != "" {
-		year, err = strconv.Atoi(yearStr)
-		if err != nil {
-			http.Error(w, "Invalid year", http.StatusBadRequest)
-			return
-		}
-	}
-
-	// Get the MongoDB collection
-	collection, err := getCollection()
+	reader := csv.NewReader(file)
+	records, err := reader.ReadAll()
 	if err != nil {
-		http.Error(w, "Failed to connect to database", http.StatusInternalServerError)
-		return
-	}
-
-	// Build the filter query
-	filter := bson.M{}
-	if title != "" {
-		filter["title"] = bson.M{"$regex": title, "$options": "i"}
-	}
-	if genre != "" {
-		filter["genre"] = bson.M{"$regex": genre, "$options": "i"}
-	}
-	if yearStr != "" {
-		filter["year"] = year
-	}
-
-	// Query the MongoDB collection
-	var movies []Movie
-	cur, err := collection.Find(context.Background(), filter)
-	if err != nil {
-		http.Error(w, "Failed to query database", http.StatusInternalServerError)
-		return
-	}
-	defer cur.Close(context.Background())
-	for cur.Next(context.Background()) {
-		var movie Movie
-		err := cur.Decode(&movie)
-		if err != nil {
-			log.Fatal(err)
-		}
-		movies = append(movies, movie)
-	}
-	if err := cur.Err(); err != nil {
 		log.Fatal(err)
 	}
 
-	// Return the movies as a JSON array
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(movies)
+	for _, record := range records[1:] {
+		year, err := strconv.Atoi(record[4])
+		if err != nil {
+			log.Fatal(err)
+		}
+		genres := strings.Split(record[8], ",")
+		movie := Movie{
+			ID:     record[0],
+			Title:  record[1],
+			Year:   year,
+			Genres: genres,
+		}
+		movies = append(movies, movie)
+	}
+
+	// set up HTTP handlers
+	http.HandleFunc("/movies", handleMovies)
+	http.HandleFunc("/movies/", handleMovie)
+
+	// start the server
+	fmt.Println("Server listening on port 8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-// Define the main function
-func main() {
-	// Create a new router
-	r := mux.NewRouter()
+func handleMovies(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		// return all movies
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, "%v", movies)
+	case http.MethodPost:
+		// create a new movie
+		id := r.FormValue("_id")
+		title := r.FormValue("title")
+		year, err := strconv.Atoi(r.FormValue("year"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		genres := strings.Split(r.FormValue("genres"), ",")
+		movie := Movie{
+			ID:     id,
+			Title:  title,
+			Year:   year,
+			Genres: genres,
+		}
+		movies = append(movies, movie)
+		w.WriteHeader(http.StatusCreated)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
 
-	// Handle GET requests with filters
-	r.HandleFunc("/movies", getMoviesHandler).Methods("GET")
+func handleMovie(w http.ResponseWriter, r *http.Request) {
+	// parse the movie ID from the URL
+	parts := strings.Split(r.URL.Path, "/")
+	id := parts[len(parts)-1]
 
-	// Start the server
-	log.Fatal(http.ListenAndServe(":8000", r))
+	// find the movie with the given ID
+	movie := findMovieByID(id)
+	if movie == nil {
+		http.Error(w, "Movie not found", http.StatusNotFound)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		// return the movie
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, "%v", movie)
+	case http.MethodPut:
+		// update the movie
+		if r.FormValue("title") != "" {
+			movie.Title = r.FormValue("title")
+		}
+		year, err := strconv.Atoi(r.FormValue("year"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		movie.Year = year
+		if r.FormValue("genres") != "" {
+			genres := strings.Split(r.FormValue("genres"), ",")
+			movie.Genres = genres
+		}
+		w.WriteHeader(http.StatusOK)
+	case http.MethodDelete:
+		// delete the movie with the given ID
+		for i, movie := range movies {
+			if movie.ID == id {
+				movies = append(movies[:i], movies[i+1:]...)
+				break
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+
+}
+
+func findMovieByID(id string) *Movie {
+	for _, movie := range movies {
+		if movie.ID == id {
+			return &movie
+		}
+	}
+	return nil
 }
